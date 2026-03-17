@@ -7,7 +7,12 @@ import cors from "cors";
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3002;
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "https://robo-ryan.github.io",
+  ],
+}));
 app.use(express.json());
 
 // Put your Nuthatch key in .env as NUTHATCH_API_KEY (recommended)
@@ -139,6 +144,71 @@ function normalizeXcFileUrl(file: string) {
   return file.startsWith("//") ? `https:${file}` : file;
 }
 
+type RegionalBird = {
+  name: string;
+  sciName: string;
+  recordingId: string | null;
+  audioUrl: string | null;
+  recordingType: string | null;
+  location: string | null;
+  country: string | null;
+};
+
+async function fetchBirdsByRegion(lat: number, lon: number): Promise<RegionalBird[]> {
+  const delta = 5;
+  const latMin = (lat - delta).toFixed(4);
+  const latMax = (lat + delta).toFixed(4);
+  const lonMin = (lon - delta).toFixed(4);
+  const lonMax = (lon + delta).toFixed(4);
+
+  const query = `box:${latMin},${lonMin},${latMax},${lonMax} grp:birds`;
+
+  const url = new URL("https://xeno-canto.org/api/3/recordings");
+  url.searchParams.set("query", query);
+  if (XENOCANTO_API_KEY) url.searchParams.set("key", XENOCANTO_API_KEY);
+  url.searchParams.set("per_page", "200");
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "BirdSounds/1.0 (local dev)",
+    },
+  });
+
+  if (!res.ok) throw new Error(`xenocanto_region_failed:${res.status}`);
+
+  const data = (await res.json()) as XenoCantoResponse;
+  const recordings = Array.isArray(data.recordings) ? data.recordings : [];
+
+  // Shuffle first so every call returns a different sample of species
+  const shuffled = [...recordings].sort(() => Math.random() - 0.5);
+
+  // Deduplicate by scientific name, take up to 15 distinct species
+  const seen = new Set<string>();
+  const unique: XenoCantoRecording[] = [];
+  for (const r of shuffled) {
+    const sciName = `${r.gen ?? ""} ${r.sp ?? ""}`.trim();
+    if (sciName && !seen.has(sciName)) {
+      seen.add(sciName);
+      unique.push(r);
+    }
+    if (unique.length >= 15) break;
+  }
+
+  return unique.map((r) => {
+    const sciName = `${r.gen ?? ""} ${r.sp ?? ""}`.trim();
+    return {
+      name: r.en ?? sciName,
+      sciName,
+      recordingId: r.id ?? null,
+      audioUrl: r.file ? normalizeXcFileUrl(r.file) : null,
+      recordingType: r.type ?? null,
+      location: r.loc ?? null,
+      country: r.cnt ?? null,
+    };
+  });
+}
+
 app.get("/health", (_req: Request, res: Response) => {
   res.json({ status: "ok" });
 });
@@ -177,6 +247,29 @@ app.get("/random-bird", async (_req: Request, res: Response) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown_error";
     res.status(500).json({ error: message });
+  }
+});
+
+// GET /birds-by-region?lat=X&lon=Y
+// Returns up to 15 shuffled distinct bird species found near the given coordinates
+app.get("/birds-by-region", async (req: Request, res: Response) => {
+  const lat = parseFloat(String(req.query.lat ?? ""));
+  const lon = parseFloat(String(req.query.lon ?? ""));
+
+  if (isNaN(lat) || isNaN(lon)) {
+    return res.status(400).json({ error: "lat and lon query params are required and must be numbers" });
+  }
+
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    return res.status(400).json({ error: "lat must be -90..90 and lon must be -180..180" });
+  }
+
+  try {
+    const birds = await fetchBirdsByRegion(lat, lon);
+    return res.json({ birds, meta: { lat, lon, fetched_at: new Date().toISOString() } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown_error";
+    return res.status(500).json({ error: message });
   }
 });
 

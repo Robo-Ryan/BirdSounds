@@ -9,6 +9,7 @@
     "strict": true,
     "skipLibCheck": true
   },
+  "exclude": ["client", "node_modules", "dist"],
   "devDependencies": {
     "typescript": "^5.0.0",
     "ts-node-dev": "^2.0.0",
